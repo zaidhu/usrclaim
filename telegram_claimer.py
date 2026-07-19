@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 API_ID = os.getenv('TG_API_ID')
 API_HASH = os.getenv('TG_API_HASH')
 PHONE = os.getenv('TG_PHONE')
+TWOFA_PASS = os.getenv('TG_TWOFA_PASS', '')
 ALT_USERNAME = "infuckable"  # Alt account that can send commands and receives notifications
 CHECK_INTERVAL = int(os.getenv('TG_INTERVAL', '120'))  # Default 2 minutes
 # ---------------------
@@ -139,7 +140,11 @@ async def main():
     client = TelegramClient('claimer_session', int(API_ID), API_HASH)
 
     try:
-        await client.start(phone=PHONE)
+        # Start with 2FA password if set
+        if TWOFA_PASS:
+            await client.start(phone=PHONE, password=TWOFA_PASS)
+        else:
+            await client.start(phone=PHONE)
         logger.info("User bot client started successfully.")
 
         # Load initial targets
