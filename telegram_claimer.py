@@ -129,6 +129,106 @@ async def monitoring_loop(client):
     claiming = False
 
 
+async def authenticate(client):
+    """
+    Robust authentication that avoids OTP expiration issues.
+    - Reuses existing session if available (no OTP needed).
+    - If session is expired/invalid, sends a new code and prompts for it.
+    - Supports 2FA password if configured.
+    - Saves session on first successful auth for future reuse.
+    """
+    session_file = 'claimer_session'
+
+    # Check if a valid session already exists
+    if os.path.exists(session_file + '.session'):
+        logger.info("Existing session file found. Attempting to reuse...")
+        try:
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                logger.info(f"✅ Session restored! Logged in as @{me.username} ({me.first_name})")
+                return True
+            else:
+                logger.warning("Session file exists but is invalid/expired. Re-authenticating...")
+        except Exception as e:
+            logger.warning(f"Session file error: {e}. Re-authenticating...")
+
+    # Need to authenticate fresh
+    logger.info("Connecting to Telegram...")
+    await client.connect()
+
+    # Send code request — this is the ONLY time we request a code
+    try:
+        code_result = await client.send_code_request(PHONE)
+        code_type = code_result.type.__class__.__name__.replace('SentCodeType', '')
+        logger.info(f"📱 Code sent via: {code_type}")
+    except errors.PhoneNumberFloodError:
+        logger.error("Too many login attempts. Telegram has temporarily blocked login for this number.")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to send code request: {e}")
+        return False
+
+    # Now prompt for the code — user must respond quickly
+    # We use a loop with timeout so the code doesn't expire silently
+    code = None
+    password = None
+
+    # Try code first
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            code = input("Enter the code you received from Telegram: ").strip()
+            if not code:
+                logger.warning("Empty code entered. Please enter the actual code.")
+                continue
+            await client.sign_in(PHONE, code)
+            logger.info("✅ Code accepted!")
+            break
+        except errors.PhoneCodeInvalidError:
+            remaining = max_retries - attempt - 1
+            if remaining > 0:
+                logger.warning(f"Invalid code. {remaining} attempt(s) remaining.")
+            else:
+                logger.error("All code attempts exhausted. Telegram may have locked login.")
+                return False
+        except errors.PhoneCodeExpiredError:
+            logger.error("The code expired! This usually means it took too long to enter.")
+            logger.error("Try running the script again and enter the code faster.")
+            return False
+        except errors.SessionPasswordNeededError:
+            logger.info("2FA password is required.")
+            if TWOFA_PASS:
+                password = TWOFA_PASS
+                logger.info("Using 2FA password from environment variable...")
+            else:
+                password = input("Enter your 2FA password: ").strip()
+
+            if not password:
+                logger.error("No 2FA password provided.")
+                return False
+
+            try:
+                await client.sign_in(password=password)
+                logger.info("✅ 2FA authentication successful!")
+                break
+            except errors.PasswordHashInvalidError:
+                logger.error("Invalid 2FA password. Please check TG_TWOFA_PASS or re-enter.")
+                return False
+        except Exception as e:
+            logger.error(f"Unexpected auth error: {e}")
+            return False
+
+    # Verify we're logged in
+    if await client.is_user_authorized():
+        me = await client.get_me()
+        logger.info(f"✅ Successfully authenticated as @{me.username} ({me.first_name})")
+        # Session is automatically saved by Telethon
+        return True
+    else:
+        logger.error("Authentication failed — not authorized.")
+        return False
+
+
 async def main():
     global targets, pending_command, claiming
 
@@ -136,15 +236,21 @@ async def main():
         logger.error("API_ID and API_HASH must be set in environment variables.")
         return
 
+    if not PHONE:
+        logger.error("TG_PHONE must be set in environment variables.")
+        return
+
     # Initialize the Telegram User Bot client
     client = TelegramClient('claimer_session', int(API_ID), API_HASH)
 
     try:
-        # Start with 2FA password if set
-        if TWOFA_PASS:
-            await client.start(phone=PHONE, password=TWOFA_PASS)
-        else:
-            await client.start(phone=PHONE)
+        # Authenticate with robust session handling
+        auth_success = await authenticate(client)
+        if not auth_success:
+            logger.error("Failed to authenticate. Exiting.")
+            await client.disconnect()
+            return
+
         logger.info("User bot client started successfully.")
 
         # Load initial targets
@@ -152,6 +258,8 @@ async def main():
         if targets:
             logger.info(f"Loaded {len(targets)} usernames from file.")
             await send_notification(client, f"📋 **Initial Targets Loaded**\n\n{len(targets)} usernames loaded from file:\n" + "\n".join(f"• @{u}" for u in targets))
+        else:
+            logger.info("No usernames.txt file found. Add targets via /add command.")
 
         # ── MESSAGE HANDLER ──────────────────────────────────────────
         @client.on(events.NewMessage)
