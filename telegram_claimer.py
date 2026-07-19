@@ -99,7 +99,7 @@ async def send_reply(client, peer, message_text, reply_to=None):
 
 async def monitoring_loop(client):
     """Main loop that checks usernames periodically."""
-    global claiming
+    global claiming, targets
     claiming = True
     logger.info("Monitoring loop started.")
     await send_notification(client, "🟢 **Monitoring Started**\n\nUsername claimer is now running and checking targets.")
